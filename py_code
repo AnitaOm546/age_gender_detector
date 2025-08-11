@@ -1,0 +1,204 @@
+import numpy as np 
+import pandas as pd 
+
+import os
+for dirname, _, filenames in os.walk('/kaggle/input'):
+    for filename in filenames:
+        print(os.path.join(dirname, filename))
+
+import cv2
+from PIL import Image
+from keras.preprocessing.image import load_img
+
+import matplotlib.pyplot as plt
+%matplotlib inline 
+
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+import tensorflow as tf
+from keras.models import Sequential, Model
+from keras.layers import Dense, Conv2D, Dropout, Flatten, MaxPooling2D, Input
+from tensorflow.keras.utils import plot_model
+
+from pathlib import Path
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.initializers import random_uniform, glorot_uniform, constant, identity
+from tensorflow.keras.layers import Add, BatchNormalization, GlobalMaxPooling2D
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras import datasets, layers, models
+
+BASE_DIRS=[r'/kaggle/input/utkface-new/UTKFace']
+
+image_paths = []
+age_labels =[]
+gender_paths =[]
+
+from tqdm import tqdm
+for BASE_DIR in BASE_DIRS:
+    for filename in tqdm(os.listdir(BASE_DIR)):
+        temp=filename.split('_')
+        if temp[0].isdigit():
+            age=int(temp[0])
+            gender=int(temp[1])
+            image_path=os.path.join(BASE_DIR,filename)
+            image_paths.append(image_path)
+            age_labels.append(age)
+            gender_paths.append(gender)
+
+print(image_paths)
+df=pd.DataFrame()
+df['image'],df['age'],df['gender']=image_paths,age_labels,gender_paths
+print(df)
+
+print("DataFrame shape:",df.shape)
+
+gender_dict={0:'Male',1:'Female'}
+
+if not df.empty:
+    try:
+        img=Image.open(df['image'][0])
+        plt.axis('off')
+        plt.imshow(img)
+        plt.show()
+    except Exception as e:
+        print("Error:",e)
+else:
+    print("No image found")
+
+sns.displot(df['age'],kde=True, bins=30)
+plt.title("Age dustribution")
+plt.xlabel('Age')
+plt.ylabel('Frequency')
+plt.show()
+
+
+## Feature Extraction: 
+## 1. Standarizing image size
+## 2. Converting into numerical array
+## 3. Redusing computational complexcity grayscale instead of RGB
+## 4. Reshaping the data to fit the input layer of our CNN
+## 5. Normalizing the pixel value to improve training efficiency
+
+def extract_feature(images):
+    features = []
+    for image_path in tqdm(images):
+        img = Image.open(image_path).convert('L')  # Correct way to open image
+        img = img.resize((128, 128), Image.BILINEAR)
+        img = np.array(img)
+        features.append(img)
+    features = np.array(features)
+    features = features.reshape(len(features), 128, 128, 1)
+    return features
+
+x= extract_feature(df['image'])
+
+x=x/255.0
+y_gender=np.array(df['gender'])
+y_age=np.array(df['age'])
+print("Shape of y_gender", y_gender.shape)
+print("Shape of y_age", y_age.shape)
+
+input_shape = (128, 128, 1)
+inputs = Input(input_shape)
+
+conv1 = Conv2D(32, kernel_size=(3,3), activation='relu')(inputs)
+maxp1 = MaxPooling2D(pool_size=(2,2))(conv1)
+
+conv2 = Conv2D(64, kernel_size=(3,3), activation='relu')(maxp1)
+maxp2 = MaxPooling2D(pool_size=(2,2))(conv2)
+
+conv3 = Conv2D(128, kernel_size=(3,3), activation='relu')(maxp2)
+maxp3 = MaxPooling2D(pool_size=(2,2))(conv3)
+
+conv4 = Conv2D(256, kernel_size=(3,3), activation='relu')(maxp3)
+maxp4 = MaxPooling2D(pool_size=(2,2))(conv4)
+
+flatten = Flatten()(maxp4)
+
+dense1 = Dense(256, activation='relu')(flatten)
+dropout1 = Dropout(0.3)(dense1)
+
+dense2 = Dense(256, activation='relu')(flatten)
+dropout2 = Dropout(0.3)(dense2)
+
+output1 = Dense(1, activation='sigmoid', name='gender_out')(dropout1)
+output2 = Dense(1, activation='linear', name='age_out')(dropout2)
+
+model = Model(inputs=inputs, outputs=[output1, output2])
+
+model.summary()
+
+y_combined=np.column_stack((y_gender, y_age))
+X_train, X_temp, y_combined_train, y_combined_temp= train_test_split(x,y_combined, test_size=0.2, random_state=42)
+x_test, x_val, y_combined_test, y_combined_val= train_test_split(X_temp, y_combined_temp, test_size=0.5, random_state=42)
+
+y_train_gender, y_train_age= y_combined_train[:,0], y_combined_train[:,1]
+y_test_gender, y_test_age= y_combined_test[:,0], y_combined_test[:,1]
+y_val_gender, y_val_age= y_combined_val[:,0], y_combined_val[:,1]
+
+model_path= './best_model.keras'
+checkpointer = ModelCheckpoint(
+    filepath= model_path,
+    monitor='val_gender_out_accuracy',
+    verbose=1,
+    mode='max',
+    save_best_only=True
+)
+from keras.callbacks import LearningRateScheduler
+model.compile(loss=['binary_crossentropy', 'mae'],
+              optimizer='adam',
+              metrics=['accuracy','mae'])
+annealer= LearningRateScheduler(lambda x: 1e-3 * 0.9 ** x)
+
+total_images=len(image_paths)
+print(f"Total number of images:{total_images}")
+
+train_images= len(X_train)
+validation_images= len(x_val)
+test_images= len(x_test)
+print("Number of training images:", train_images)
+print("Number of validation images:", validation_images)
+print("Number of test images:", test_images)
+
+# import tensorflow as tf >>already imported
+tf.config.run_functions_eagerly(True)
+
+##below steps will take time
+history=model.fit(
+    x=X_train,
+    y=[y_train_gender, y_train_age],
+    batch_size=128,
+    epochs=100,
+    validation_data=(x_val, [y_val_gender, y_val_age]),
+    callbacks=[annealer, checkpointer]
+)
+##______------------------------------
+acc=history.history['gender_out_accuracy']
+val_acc=history.history['val_gender_out_accuracy']
+epochs=range(len(acc))
+plt.plot(epochs, acc, 'b', label='Training accuracy')
+plt.plot(epochs, val_acc, 'r', label='Validation accuracy')
+plt.title('Accuracy Graph')
+plt.legend()
+plt.show()
+   
+plt.plot(history.history['gender_out_accuracy'])
+plt.plot(history.history['val_gender_out_accuracy'])
+plt.title('Gender Accuracy')
+plt.ylabel('Accuracy')
+plt.xlabel('Epoch')
+plt.legend(['Train','validation'], loc='upper left')
+plt.show()
+
+image_index=3000
+print(f"Gender:\t{gender_dict[y_gender[image_index]]}\t Age:\t{y_age[image_index]}")
+
+pred=model.predict(x[image_index].reshape(1,128,128,1))
+pred_gender=gender_dict[int(round(pred[0][0][0]))]
+pred_age=round(pred[1][0][0])
+
+print(f"Predicted gender: \t {pred_gender}\t Predicted age: \t {pred_age}")
+plt.title(f"Gender:{pred_gender}, Age{pred_age}")
+plt.imshow(x[image_index].reshape(128,128), cmap='gray')
+plt.show()
